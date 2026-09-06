@@ -1,72 +1,267 @@
 import streamlit as st
+import markdown as md
 from PIL import Image
 from gemini_service import analyze_health_document_openai
 
-st.set_page_config(page_title="MedScan AI", page_icon="💊", layout="centered")
+st.set_page_config(
+    page_title="MedScan Pro | AI Medical Document Analysis",
+    page_icon="🏥",
+    layout="wide"
+)
 
+# ==================== CUSTOM CSS ====================
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Outfit:wght@500;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
-    body {
-        font-family: 'Plus Jakarta Sans', sans-serif !important;
+    * {
+        font-family: 'Inter', sans-serif !important;
     }
 
     .stApp {
-        background-color: #e8f0fe;
+        background: #f0f4f8;
     }
 
-    .header-card {
-        background: #2563eb;
-        padding: 2.5rem;
-        border-radius: 20px;
-        text-align: center;
-        box-shadow: 0 10px 25px rgba(37, 99, 235, 0.25);
-        border: 1px solid #1d4ed8;
-        margin-bottom: 2rem;
+    .hero {
+        background: linear-gradient(135deg, #0a1628 0%, #1a3a6a 100%);
+        padding: 3rem 4rem;
+        border-radius: 16px;
+        margin: 0 2rem 2rem 2rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        box-shadow: 0 8px 32px rgba(10, 22, 40, 0.25);
     }
 
-    .header-card h1 {
-        font-family: 'Outfit', sans-serif !important;
-        color: #ffffff !important;
+    .hero-content h1 {
+        color: #ffffff;
+        font-size: 2.5rem;
+        font-weight: 800;
+        letter-spacing: -1px;
         margin-bottom: 0.5rem;
-        font-size: 2.3rem;
-        font-weight: 700;
-        letter-spacing: -0.5px;
-        -webkit-text-fill-color: #ffffff !important;
     }
 
-    .title-divider {
-        height: 3px;
-        width: 100%;
-        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.6), transparent);
-        margin: 1rem auto 1.5rem auto;
-        border-radius: 2px;
+    .hero-content h1 span {
+        color: #60a5fa;
     }
 
-    .header-card p {
-        color: #dbeafe !important;
+    .hero-content p {
+        color: #94a3b8;
         font-size: 1.1rem;
+        font-weight: 400;
+        max-width: 550px;
+        line-height: 1.6;
+    }
+
+    .hero-badge {
+        display: inline-block;
+        background: rgba(37, 99, 235, 0.2);
+        color: #60a5fa;
+        padding: 0.3rem 1rem;
+        border-radius: 20px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        margin-bottom: 1rem;
+        border: 1px solid rgba(37, 99, 235, 0.3);
+    }
+
+    .hero-stats {
+        display: flex;
+        gap: 2.5rem;
+        margin-top: 1.5rem;
+    }
+
+    .hero-stats .stat {
+        text-align: center;
+    }
+
+    .hero-stats .stat .number {
+        color: #ffffff;
+        font-size: 1.5rem;
+        font-weight: 700;
+    }
+
+    .hero-stats .stat .label {
+        color: #64748b;
+        font-size: 0.75rem;
+        font-weight: 400;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .hero-icon {
+        background: rgba(37, 99, 235, 0.15);
+        padding: 1.5rem;
+        border-radius: 50%;
+        border: 2px solid rgba(37, 99, 235, 0.3);
+        font-size: 4rem;
+    }
+
+    .main-container {
+        padding: 0 2rem 2rem 2rem;
+    }
+
+    .upload-card {
+        background: #ffffff;
+        border-radius: 16px;
+        padding: 2.5rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        border: 1px solid #e2e8f0;
+        margin-bottom: 2rem;
+        transition: all 0.3s ease;
+    }
+
+    .upload-card:hover {
+        box-shadow: 0 8px 25px rgba(0,0,0,0.08);
+        border-color: #93c5fd;
+    }
+
+    .upload-card h3 {
+        color: #0a1628;
+        font-weight: 600;
+        font-size: 1.2rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .upload-card p {
+        color: #64748b;
+        font-size: 0.95rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .upload-card .supported-formats {
+        display: inline-block;
+        background: #f1f5f9;
+        color: #475569;
+        padding: 0.3rem 1rem;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: 500;
+        margin-bottom: 0.5rem;
+    }
+
+    .upload-card .file-limits {
+        color: #94a3b8;
+        font-size: 0.8rem;
+        margin-top: 0.5rem;
     }
 
     [data-testid="stFileUploader"] label {
+        display: none !important;
+    }
+
+    [data-testid="stFileUploader"] div[data-testid="stMarkdownContainer"] {
+        display: none !important;
+    }
+
+    [data-testid="stFileUploader"] {
+        border: 2px dashed #cbd5e1;
+        border-radius: 12px;
+        padding: 2rem;
+        background: #fafbfc;
+        transition: all 0.3s ease;
+    }
+
+    [data-testid="stFileUploader"]:hover {
+        border-color: #2563eb;
+        background: #f1f5f9;
+    }
+
+    [data-testid="stFileUploader"] .stAlert {
+        display: none !important;
+    }
+
+    .result-card {
+        background: #ffffff;
+        border-radius: 16px;
+        padding: 2.5rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        border: 1px solid #e2e8f0;
+        border-left: 6px solid #2563eb;
+        margin-top: 1.5rem;
+    }
+
+    .result-card .result-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.5rem;
+        padding-bottom: 1rem;
+        border-bottom: 2px solid #f1f5f9;
+    }
+
+    .result-card .result-header h3 {
+        color: #0a1628;
+        font-weight: 700;
+        font-size: 1.3rem;
+    }
+
+    .result-card .result-header .badge {
+        background: #dcfce7;
+        color: #166534;
+        padding: 0.3rem 1rem;
+        border-radius: 20px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+
+    .result-content {
+        color: #0a1628 !important;
+        font-size: 1rem;
+        line-height: 1.8;
+    }
+
+    .result-content p,
+    .result-content li,
+    .result-content div,
+    .result-content span {
+        color: #0a1628 !important;
+    }
+
+    .result-content strong {
         color: #1e293b !important;
-        font-weight: 600 !important;
+    }
+
+    .result-content h1,
+    .result-content h2,
+    .result-content h3 {
+        color: #2563eb !important;
+        font-weight: 700;
+        margin-top: 1.2rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .result-content ul,
+    .result-content ol {
+        padding-left: 1.4rem;
+        margin-bottom: 0.8rem;
+    }
+
+    .result-content li {
+        margin-bottom: 0.4rem;
+    }
+
+    .result-content hr {
+        border: none;
+        border-top: 1px solid #e2e8f0;
+        margin: 1.2rem 0;
     }
 
     .stButton > button {
         background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
         color: white;
-        font-family: 'Outfit', sans-serif !important;
         font-weight: 600;
-        font-size: 1.1rem;
+        font-size: 1rem;
         border: none;
-        padding: 0.75rem 1.5rem;
-        border-radius: 12px;
+        padding: 0.75rem 2rem;
+        border-radius: 10px;
         box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);
         transition: all 0.3s ease;
         width: 100%;
+        letter-spacing: 0.3px;
     }
 
     .stButton > button:hover {
@@ -75,58 +270,151 @@ st.markdown(
         transform: translateY(-2px);
     }
 
-    .result-container {
-        background-color: #ffffff;
-        padding: 2.5rem;
-        border-radius: 20px;
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.06);
-        border: 1px solid #cbd5e1;
-        border-left: 8px solid #2563eb;
-        margin-top: 1.5rem;
+    .footer {
+        text-align: center;
+        padding: 2rem;
+        color: #94a3b8;
+        font-size: 0.8rem;
+        border-top: 1px solid #e2e8f0;
+        margin-top: 2rem;
     }
 
-    /* Forces all text, paragraphs, lists, and general output to solid black */
-    .result-container, .result-container p, .result-container li, .result-container span, .result-container div {
-        color: #000000 !important;
-        font-size: 1.05rem;
-        line-height: 1.6;
+    .footer a {
+        color: #2563eb;
+        text-decoration: none;
     }
 
-    .result-container h3, .result-container h2, .result-container h1 {
-        font-family: 'Outfit', sans-serif !important;
-        color: #1d4ed8 !important;
-        font-weight: 600;
-        margin-top: 1rem;
+    @media (max-width: 768px) {
+        .hero {
+            flex-direction: column;
+            text-align: center;
+            padding: 2rem;
+        }
+        .hero-content p {
+            max-width: 100%;
+        }
+        .hero-stats {
+            justify-content: center;
+        }
+        .main-container {
+            padding: 0 1rem 1rem 1rem;
+        }
     }
     </style>
     """,
     unsafe_allow_html=True
 )
 
+# ==================== HERO SECTION ====================
 st.markdown(
     """
-    <div class="header-card">
-        <h1>AI Health Document & Medication Simplifier</h1>
-        <div class="title-divider"></div>
-        <p>Upload a photo of your medicine or lab report to get a clear, structured clinical breakdown.</p>
+    <div class="hero">
+        <div class="hero-content">
+            <div class="hero-badge">⚡ AI-POWERED ANALYSIS</div>
+            <h1>Medical Document <br><span>Intelligence</span> Simplified</h1>
+            <p>Upload a photo of your medicine or lab report and get a clear, structured clinical breakdown in plain language — instantly.</p>
+            <div class="hero-stats">
+                <div class="stat">
+                    <div class="number">AI</div>
+                    <div class="label">Vision Powered</div>
+                </div>
+                <div class="stat">
+                    <div class="number">7</div>
+                    <div class="label">Key Sections</div>
+                </div>
+                <div class="stat">
+                    <div class="number">Free</div>
+                    <div class="label">To Use</div>
+                </div>
+            </div>
+        </div>
+        <div class="hero-icon">🧬</div>
     </div>
     """,
     unsafe_allow_html=True
 )
 
-uploaded_file = st.file_uploader("Choose an image (Medicine or Lab Report)", type=["jpg", "jpeg", "png"])
+# ==================== MAIN CONTENT ====================
+st.markdown('<div class="main-container">', unsafe_allow_html=True)
+
+# --- Upload Section ---
+st.markdown(
+    """
+    <div class="upload-card">
+        <h3>📤 Upload Document</h3>
+        <p>Upload a photo of your medicine label, prescription box, or lab report for AI-powered analysis.</p>
+        <div class="supported-formats">📷 Supported: JPG, JPEG, PNG</div>
+        <div class="file-limits">📄 Max 200MB per file</div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# ===== FILE UPLOADER =====
+uploaded_file = st.file_uploader(
+    "",
+    type=["jpg", "jpeg", "png"],
+    label_visibility="collapsed"
+)
+
+st.markdown(
+    """
+    <div style="text-align: center; margin-top: -20px; padding-bottom: 10px;">
+        <span style="color: #0a1628; font-weight: 500;">📁 Drag & drop your file here</span>
+        <br>
+        <span style="color: #94a3b8; font-size: 0.8rem;">or click to browse files</span>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Document Preview", use_container_width=True)
 
-    if st.button("Analyze Document"):
-        with st.spinner("Analyzing with Qwen Vision..."):
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.image(image, caption="📸 Document Preview", use_container_width=True)
+
+    if st.button("🔍 Analyze Document", use_container_width=True):
+        with st.spinner("🧠 AI is analyzing your document..."):
             try:
                 result = analyze_health_document_openai(image)
-                st.markdown('<div class="result-container">', unsafe_allow_html=True)
-                st.subheader("📋 Comprehensive Analysis Result:")
-                st.write(result)
-                st.markdown('</div>', unsafe_allow_html=True)
+                result_html = md.markdown(result, extensions=["extra", "sane_lists"])
+
+                st.markdown(
+                    f"""
+                    <div class="result-card">
+                        <div class="result-header">
+                            <h3>📋 Analysis Report</h3>
+                            <span class="badge">✓ Complete</span>
+                        </div>
+                        <div class="result-content">
+                            {result_html}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
             except Exception as e:
-                st.error(f"An error occurred: {e}")
+                st.error(f"⚠️ Analysis failed: {e}")
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ==================== FOOTER ====================
+st.markdown(
+    """
+    <div class="footer">
+        <p>
+            ⚕️ <strong>MedScan Pro</strong> — AI-powered medical document analysis for healthcare professionals and patients.
+            <br>
+            <span style="font-size:0.75rem; color:#94a3b8;">
+                This is not a diagnosis. Always consult your healthcare provider for medical decisions.
+            </span>
+            <br><br>
+            © 2026 MedScan Pro
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
