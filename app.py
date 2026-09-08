@@ -350,26 +350,36 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ===== FILE UPLOADER =====
-uploaded_file = st.file_uploader(
-    "",
-    type=["jpg", "jpeg", "png"],
-    label_visibility="collapsed"
-)
+# ===== UPLOAD OR CAMERA =====
+tab1, tab2 = st.tabs(["📁 Upload File", "📷 Use Camera"])
 
-st.markdown(
-    """
-    <div style="text-align: center; margin-top: -20px; padding-bottom: 10px;">
-        <span style="color: #0a1628; font-weight: 500;">📁 Drag & drop your file here</span>
-        <br>
-        <span style="color: #94a3b8; font-size: 0.8rem;">or click to browse files</span>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+uploaded_file = None
+camera_file = None
 
-if uploaded_file is not None:
-    image = Image.open(uploaded_file)
+with tab1:
+    uploaded_file = st.file_uploader(
+        "",
+        type=["jpg", "jpeg", "png"],
+        label_visibility="collapsed"
+    )
+    st.markdown(
+        """
+        <div style="text-align: center; margin-top: -10px; padding-bottom: 10px;">
+            <span style="color: #0a1628; font-weight: 500;">📁 Drag & drop your file here</span>
+            <br>
+            <span style="color: #94a3b8; font-size: 0.8rem;">or click to browse files</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with tab2:
+    camera_file = st.camera_input("Take a photo of the medicine or lab report", label_visibility="collapsed")
+
+image_source = uploaded_file if uploaded_file is not None else camera_file
+
+if image_source is not None:
+    image = Image.open(image_source)
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
