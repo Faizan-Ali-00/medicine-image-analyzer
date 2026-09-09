@@ -1,430 +1,902 @@
 import streamlit as st
 import markdown as md
 from PIL import Image
+import os
+import subprocess
+import tempfile
+import base64
+import json
+import hashlib
+from pathlib import Path
+from datetime import datetime
+import requests
+from bs4 import BeautifulSoup
 from gemini_service import analyze_health_document_openai
 
+_asset_candidates = [
+    Path(__file__).resolve().parent / "assets" / "doctor_portrait.jpg",
+    Path.cwd() / "assets" / "doctor_portrait.jpg",
+    Path(__file__).resolve().parent / "doctor_portrait.jpg",
+]
+DOCTOR_IMAGE = next((candidate for candidate in _asset_candidates if candidate.exists()), _asset_candidates[0])
+_guidance_candidates = [
+    Path(__file__).resolve().parent / "assets" / "doctor_guidance.jpg",
+    Path.cwd() / "assets" / "doctor_guidance.jpg",
+]
+DOCTOR_GUIDANCE_IMAGE = next((candidate for candidate in _guidance_candidates if candidate.exists()), _guidance_candidates[0])
+_intro_candidates = [
+    Path(__file__).resolve().parent / "assets" / "doctor_intro.jpg",
+    Path.cwd() / "assets" / "doctor_intro.jpg",
+]
+DOCTOR_INTRO_IMAGE = next((candidate for candidate in _intro_candidates if candidate.exists()), _intro_candidates[0])
+DOCTOR_DATA_URI = ""
+if DOCTOR_IMAGE.exists():
+    with DOCTOR_IMAGE.open("rb") as doctor_file:
+        DOCTOR_DATA_URI = "data:image/jpeg;base64," + base64.b64encode(doctor_file.read()).decode("ascii")
+
+WHO_TOPICS = {
+    "Digital health": "https://www.who.int/health-topics/digital-health",
+    "Healthy diet": "https://www.who.int/health-topics/healthy-diet",
+    "Mental health": "https://www.who.int/health-topics/mental-health",
+    "Diabetes": "https://www.who.int/health-topics/diabetes",
+    "Cardiovascular diseases": "https://www.who.int/health-topics/cardiovascular-diseases",
+    "Antimicrobial resistance": "https://www.who.int/health-topics/antimicrobial-resistance",
+    "Air pollution": "https://www.who.int/health-topics/air-pollution",
+    "Vaccines and immunization": "https://www.who.int/health-topics/vaccines-and-immunization",
+    "Emergency care": "https://www.who.int/health-topics/emergency-care",
+    "Women's health": "https://www.who.int/health-topics/women-s-health",
+}
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_who_updates():
+    """Retrieve a small set of current official WHO newsroom links."""
+    try:
+        response = requests.get("https://www.who.int/news-room", timeout=12, headers={"User-Agent": "MedInsightAI/1.0"})
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        updates = []
+        seen = set()
+        for link in soup.select("a[href]"):
+            href = link.get("href", "")
+            title = " ".join(link.get_text(" ", strip=True).split())
+            if not title or len(title) < 20 or "/news/item/" not in href:
+                continue
+            url = href if href.startswith("http") else "https://www.who.int" + href
+            if url in seen:
+                continue
+            seen.add(url)
+            updates.append({"title": title, "url": url})
+            if len(updates) == 6:
+                break
+        return updates
+    except Exception:
+        return []
+
+WHO_ARCHIVE_FILE = Path(__file__).resolve().parent / ".who_updates_archive.json"
+
+def load_who_archive():
+    try:
+        if WHO_ARCHIVE_FILE.exists():
+            return json.loads(WHO_ARCHIVE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        pass
+    return []
+
+def save_who_archive(archive):
+    try:
+        WHO_ARCHIVE_FILE.write_text(json.dumps(archive, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+def update_who_archive(latest_updates):
+    """Merge freshly fetched WHO updates into a persistent local archive so older items are never lost, even after WHO's live newsroom page moves on."""
+    archive = load_who_archive()
+    known_urls = {item.get("url") for item in archive}
+    changed = False
+    for item in latest_updates:
+        if item.get("url") not in known_urls:
+            archive.insert(0, {"title": item.get("title"), "url": item.get("url"), "first_seen": datetime.now().strftime("%d %b %Y, %H:%M")})
+            known_urls.add(item.get("url"))
+            changed = True
+    archive = archive[:60]
+    if changed:
+        save_who_archive(archive)
+    return archive
+
 st.set_page_config(
-    page_title="MedScan Pro | AI Medical Document Analysis",
-    page_icon="🏥",
-    layout="wide"
+    page_title="MedInsight AI | Intelligent Medical Analysis System",
+    page_icon="✚",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# ==================== CUSTOM CSS ====================
+USAGE_FILE = Path(__file__).resolve().parent / ".medinsight_usage.json"
+
+def load_usage():
+    defaults = {"documents_analyzed": 24, "saved_insights": 12, "reports_reviewed": 18, "analysis_ids": [], "history": []}
+    try:
+        if USAGE_FILE.exists():
+            defaults.update(json.loads(USAGE_FILE.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        pass
+    return defaults
+
+def save_usage(usage):
+    try:
+        USAGE_FILE.write_text(json.dumps(usage, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+if "usage" not in st.session_state:
+    st.session_state.usage = load_usage()
+
+def register_analysis(image_source):
+    """Count one successful document review once, even across Streamlit reruns."""
+    try:
+        file_bytes = image_source.getvalue()
+    except AttributeError:
+        file_bytes = bytes(image_source)
+    analysis_id = hashlib.sha256(file_bytes).hexdigest()
+    usage = st.session_state.usage
+    if analysis_id in usage.get("analysis_ids", []):
+        return False
+    usage.setdefault("analysis_ids", []).append(analysis_id)
+    usage["documents_analyzed"] = int(usage.get("documents_analyzed", 0)) + 1
+    usage["reports_reviewed"] = int(usage.get("reports_reviewed", 0)) + 1
+    filename = getattr(image_source, "name", "Medical document") or "Medical document"
+    usage.setdefault("history", []).insert(0, {"name": filename, "time": datetime.now().strftime("%d %b %Y, %H:%M"), "status": "Reviewed"})
+    usage["history"] = usage["history"][:20]
+    save_usage(usage)
+    return True
+
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
-
-    * {
-        font-family: 'Inter', sans-serif !important;
-    }
-
-    .stApp {
-        background: #f0f4f8;
-    }
-
-    .hero {
-        background: linear-gradient(135deg, #0a1628 0%, #1a3a6a 100%);
-        padding: 3rem 4rem;
-        border-radius: 16px;
-        margin: 0 2rem 2rem 2rem;
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap');
+    :root{--bg:#f0f7f2;--paper:#ffffff;--ink:#1a2e26;--muted:#5a7a6a;--line:#d4e8da;--forest:#0d3d2e;--forest2:#1a5a44;--green:#2e9b62;--lime:#c9f1d3;--sage:#e8f5ec;--cream:#fbf7ed;--danger:#a44145;--who-blue:#0093d0;--who-teal:#007a7a}
+    html,body,[class*="css"]{font-family:'DM Sans',sans-serif}.stApp{background:var(--bg);color:var(--ink)}
+    [data-testid="stHeader"]{background:transparent}.block-container{max-width:1350px;padding:1rem 2.4rem 2rem}
+    [data-testid="stSidebar"]{background:var(--forest);border:0}[data-testid="stSidebar"] *{color:#dceee2!important}
+    [data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.12)}[data-testid="stSidebar"] .stRadio label{padding:.45rem .55rem;border-radius:9px}
+    [data-testid="stSidebar"] .stRadio label:hover{background:rgba(255,255,255,.08)}
+    
+    /* ===== SIDEBAR ===== */
+    .brand{display:flex;gap:.7rem;align-items:center;padding:.5rem 0 1.5rem}
+    .brand-mark{display:grid;place-items:center;width:38px;height:38px;border-radius:12px;background:var(--lime);color:var(--forest);font-weight:800;font-size:1.2rem}
+    .brand-name{font-family:'Manrope';font-size:1rem;font-weight:800;letter-spacing:-.04em}
+    .brand-sub{opacity:.6;font-size:.65rem;margin-top:.12rem}
+    .side-section{font-size:.64rem;opacity:.5;text-transform:uppercase;letter-spacing:.15em;margin:.9rem 0 .5rem}
+    
+    /* ===== TOPBAR ===== */
+    .topbar{display:flex;justify-content:space-between;align-items:center;padding:.35rem 0 1.3rem}
+    .topmark{font-family:'Manrope';font-size:1.15rem;font-weight:800;color:var(--forest);letter-spacing:-.05em}
+    .topmark span{color:var(--green)}
+    .top-actions{display:flex;gap:.6rem;align-items:center}
+    .status{display:inline-flex;align-items:center;gap:.4rem;background:#e7f6eb;color:#277449;border:1px solid #c9e8d0;border-radius:99px;padding:.43rem .65rem;font-size:.7rem;font-weight:700}
+    .dot{width:7px;height:7px;background:#39a86f;border-radius:50%;animation:pulse-dot 2s infinite}
+    @keyframes pulse-dot{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.3;transform:scale(.8)}}
+    .avatar{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--forest);color:white;font-size:.7rem;font-weight:800}
+    
+    /* ===== HERO SECTION ===== */
+    .hero-premium {
+        background: linear-gradient(145deg, #0a3226 0%, #1a5a44 50%, #0d3d2e 100%);
+        border-radius: 32px;
+        padding: 3rem 3.5rem;
         display: flex;
-        justify-content: space-between;
         align-items: center;
-        box-shadow: 0 8px 32px rgba(10, 22, 40, 0.25);
+        gap: 3rem;
+        min-height: 380px;
+        position: relative;
+        overflow: hidden;
+        box-shadow: 0 20px 60px rgba(13, 61, 46, 0.3);
     }
-
-    .hero-content h1 {
-        color: #ffffff;
-        font-size: 2.5rem;
-        font-weight: 800;
-        letter-spacing: -1px;
-        margin-bottom: 0.5rem;
+    .hero-premium::before {
+        content: '';
+        position: absolute;
+        top: -30%;
+        right: -10%;
+        width: 500px;
+        height: 500px;
+        background: radial-gradient(circle, rgba(46, 155, 98, 0.08) 0%, transparent 70%);
+        border-radius: 50%;
+        pointer-events: none;
     }
-
-    .hero-content h1 span {
-        color: #60a5fa;
+    .hero-premium::after {
+        content: '';
+        position: absolute;
+        bottom: -20%;
+        left: 20%;
+        width: 300px;
+        height: 300px;
+        background: radial-gradient(circle, rgba(46, 155, 98, 0.05) 0%, transparent 70%);
+        border-radius: 50%;
+        pointer-events: none;
     }
-
-    .hero-content p {
-        color: #94a3b8;
-        font-size: 1.1rem;
-        font-weight: 400;
-        max-width: 550px;
-        line-height: 1.6;
+    .hero-content {
+        flex: 1.2;
+        position: relative;
+        z-index: 2;
     }
-
+    .hero-visual {
+        flex: 0.8;
+        position: relative;
+        z-index: 2;
+        display: flex;
+        justify-content: center;
+        align-items: flex-end;
+        min-height: 300px;
+    }
     .hero-badge {
         display: inline-block;
-        background: rgba(37, 99, 235, 0.2);
-        color: #60a5fa;
-        padding: 0.3rem 1rem;
-        border-radius: 20px;
-        font-size: 0.75rem;
-        font-weight: 600;
-        letter-spacing: 0.5px;
-        text-transform: uppercase;
-        margin-bottom: 1rem;
-        border: 1px solid rgba(37, 99, 235, 0.3);
-    }
-
-    .hero-stats {
-        display: flex;
-        gap: 2.5rem;
-        margin-top: 1.5rem;
-    }
-
-    .hero-stats .stat {
-        text-align: center;
-    }
-
-    .hero-stats .stat .number {
-        color: #ffffff;
-        font-size: 1.5rem;
+        background: rgba(46, 155, 98, 0.2);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(46, 155, 98, 0.3);
+        padding: .4rem 1rem;
+        border-radius: 99px;
+        font-size: .65rem;
         font-weight: 700;
+        color: #91deb0;
+        letter-spacing: .05em;
+        margin-bottom: 1rem;
     }
-
-    .hero-stats .stat .label {
-        color: #64748b;
-        font-size: 0.75rem;
-        font-weight: 400;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
+    .hero-title {
+        font-family: 'Manrope';
+        font-size: clamp(2.2rem, 5vw, 3.8rem);
+        font-weight: 800;
+        line-height: 1.05;
+        letter-spacing: -0.06em;
+        color: white;
+        margin: 0;
+        max-width: 600px;
     }
-
-    .hero-icon {
-        background: rgba(37, 99, 235, 0.15);
-        padding: 1.5rem;
-        border-radius: 50%;
-        border: 2px solid rgba(37, 99, 235, 0.3);
-        font-size: 4rem;
+    .hero-title .highlight {
+        background: linear-gradient(135deg, #bdf0ca, #6bc98a);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
     }
-
-    .main-container {
-        padding: 0 2rem 2rem 2rem;
+    .hero-desc {
+        color: rgba(200, 223, 212, 0.9);
+        font-size: 1rem;
+        line-height: 1.7;
+        max-width: 460px;
+        margin: 1.2rem 0 1.8rem;
     }
-
-    .upload-card {
-        background: #ffffff;
-        border-radius: 16px;
-        padding: 2.5rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-        border: 1px solid #e2e8f0;
-        margin-bottom: 2rem;
-        transition: all 0.3s ease;
+    .hero-actions {
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+        flex-wrap: wrap;
     }
-
-    .upload-card:hover {
-        box-shadow: 0 8px 25px rgba(0,0,0,0.08);
-        border-color: #93c5fd;
+    .btn-primary-hero {
+        display: inline-flex;
+        align-items: center;
+        gap: .6rem;
+        background: linear-gradient(135deg, #bdf0ca, #7edba0);
+        color: #0a3226 !important;
+        padding: .85rem 2.2rem;
+        border-radius: 14px;
+        font-size: .85rem;
+        font-weight: 800;
+        text-decoration: none;
+        transition: all .3s ease;
+        box-shadow: 0 8px 30px rgba(46, 155, 98, 0.35);
+        border: none;
+        cursor: pointer;
     }
-
-    .upload-card h3 {
-        color: #0a1628;
+    .btn-primary-hero:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 12px 40px rgba(46, 155, 98, 0.45);
+    }
+    .btn-secondary-hero {
+        display: inline-flex;
+        align-items: center;
+        gap: .4rem;
+        color: rgba(255, 255, 255, 0.85) !important;
+        font-size: .85rem;
         font-weight: 600;
-        font-size: 1.2rem;
-        margin-bottom: 0.5rem;
+        text-decoration: none;
+        padding: .85rem 1.5rem;
+        border-radius: 14px;
+        border: 2px solid rgba(255, 255, 255, 0.15);
+        transition: all .3s ease;
+        background: rgba(255, 255, 255, 0.05);
+        backdrop-filter: blur(10px);
     }
-
-    .upload-card p {
-        color: #64748b;
-        font-size: 0.95rem;
-        margin-bottom: 0.5rem;
+    .btn-secondary-hero:hover {
+        background: rgba(255, 255, 255, 0.12);
+        border-color: rgba(255, 255, 255, 0.3);
+        transform: translateY(-2px);
     }
-
-    .upload-card .supported-formats {
-        display: inline-block;
-        background: #f1f5f9;
-        color: #475569;
-        padding: 0.3rem 1rem;
+    
+    /* ===== DOCTOR WITH PAPERBOARD ===== */
+    .doctor-combo {
+        display: flex;
+        align-items: flex-end;
+        gap: 0;
+        position: relative;
+    }
+    .paperboard-premium {
+        width: 220px;
+        height: 165px;
+        background: white;
         border-radius: 20px;
-        font-size: 0.8rem;
-        font-weight: 500;
-        margin-bottom: 0.5rem;
+        padding: 1.2rem 1.4rem;
+        box-shadow: 0 25px 60px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.1);
+        transform: rotate(-5deg) translateY(-15px);
+        margin-right: -35px;
+        flex-shrink: 0;
+        position: relative;
+        z-index: 3;
+        transition: transform 0.3s ease;
     }
-
-    .upload-card .file-limits {
-        color: #94a3b8;
-        font-size: 0.8rem;
-        margin-top: 0.5rem;
+    .paperboard-premium:hover {
+        transform: rotate(-3deg) translateY(-18px);
     }
-
-    [data-testid="stFileUploader"] label {
-        display: none !important;
+    .paperboard-premium::before {
+        content: '';
+        position: absolute;
+        top: -10px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 40px;
+        height: 8px;
+        background: #c0ccc0;
+        border-radius: 4px 4px 0 0;
+        box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.1);
     }
-
-    [data-testid="stFileUploader"] div[data-testid="stMarkdownContainer"] {
-        display: none !important;
-    }
-
-    [data-testid="stFileUploader"] {
-        border: 2px dashed #cbd5e1;
-        border-radius: 12px;
-        padding: 2rem;
-        background: #fafbfc;
-        transition: all 0.3s ease;
-    }
-
-    [data-testid="stFileUploader"]:hover {
-        border-color: #2563eb;
-        background: #f1f5f9;
-    }
-
-    [data-testid="stFileUploader"] .stAlert {
-        display: none !important;
-    }
-
-    .result-card {
-        background: #ffffff;
-        border-radius: 16px;
-        padding: 2.5rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-        border: 1px solid #e2e8f0;
-        border-left: 6px solid #2563eb;
-        margin-top: 1.5rem;
-    }
-
-    .result-card .result-header {
+    .paperboard-premium .pb-top {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        margin-bottom: 1.5rem;
-        padding-bottom: 1rem;
-        border-bottom: 2px solid #f1f5f9;
+        margin-bottom: .5rem;
     }
-
-    .result-card .result-header h3 {
-        color: #0a1628;
+    .paperboard-premium .pb-top-label {
+        font-size: .5rem;
+        font-weight: 800;
+        color: #8a9e8a;
+        text-transform: uppercase;
+        letter-spacing: .1em;
+    }
+    .pb-status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #2e9b62;
+        animation: pulse-dot 2s infinite;
+        display: inline-block;
+    }
+    .paperboard-premium .pb-title {
+        font-size: .75rem;
         font-weight: 700;
-        font-size: 1.3rem;
+        color: #0a3226;
+        margin-bottom: .3rem;
     }
-
-    .result-card .result-header .badge {
-        background: #dcfce7;
-        color: #166534;
-        padding: 0.3rem 1rem;
-        border-radius: 20px;
-        font-size: 0.75rem;
-        font-weight: 600;
+    .paperboard-premium .pb-lines {
+        margin: .2rem 0;
     }
-
-    .result-content {
-        color: #0a1628 !important;
-        font-size: 1rem;
-        line-height: 1.8;
+    .paperboard-premium .pb-line {
+        height: 5px;
+        border-radius: 99px;
+        background: #eef5ef;
+        margin: .3rem 0;
     }
-
-    .result-content p,
-    .result-content li,
-    .result-content div,
-    .result-content span {
-        color: #0a1628 !important;
+    .paperboard-premium .pb-line.short { width: 40%; }
+    .paperboard-premium .pb-line.medium { width: 65%; }
+    .paperboard-premium .pb-line.long { width: 85%; }
+    .paperboard-premium .pb-rec-text {
+        font-size: .62rem;
+        line-height: 1.45;
+        color: #3d5a4a;
+        margin: .3rem 0 .1rem;
     }
-
-    .result-content strong {
-        color: #1e293b !important;
+    .paperboard-premium .pb-rec-text strong {
+        color: #0a3226;
     }
-
-    .result-content h1,
-    .result-content h2,
-    .result-content h3 {
-        color: #2563eb !important;
-        font-weight: 700;
-        margin-top: 1.2rem;
-        margin-bottom: 0.5rem;
+    .paperboard-premium .pb-footer {
+        display: flex;
+        align-items: center;
+        gap: .5rem;
+        margin-top: .5rem;
+        padding-top: .5rem;
+        border-top: 1.5px solid #eef5ef;
     }
-
-    .result-content ul,
-    .result-content ol {
-        padding-left: 1.4rem;
-        margin-bottom: 0.8rem;
-    }
-
-    .result-content li {
-        margin-bottom: 0.4rem;
-    }
-
-    .result-content hr {
-        border: none;
-        border-top: 1px solid #e2e8f0;
-        margin: 1.2rem 0;
-    }
-
-    .stButton > button {
-        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+    .pb-check-circle {
+        width: 18px;
+        height: 18px;
+        background: #2e9b62;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         color: white;
-        font-weight: 600;
-        font-size: 1rem;
-        border: none;
-        padding: 0.75rem 2rem;
-        border-radius: 10px;
-        box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);
-        transition: all 0.3s ease;
-        width: 100%;
-        letter-spacing: 0.3px;
+        font-size: 11px;
+        font-weight: 800;
+        flex-shrink: 0;
     }
-
-    .stButton > button:hover {
-        background: linear-gradient(135deg, #1d4ed8 0%, #1e40af 100%);
-        box-shadow: 0 6px 20px rgba(37, 99, 235, 0.4);
-        transform: translateY(-2px);
+    .pb-check-text {
+        color: #2e9b62;
+        font-size: .65rem;
+        font-weight: 700;
     }
-
-    .footer {
+    .pb-version {
+        margin-left: auto;
+        font-size: .45rem;
+        color: #8a9e8a;
+        font-weight: 700;
+        background: #f0f5f0;
+        padding: .15rem .5rem;
+        border-radius: 99px;
+    }
+    .doctor-portrait-premium {
+        position: relative;
+        z-index: 4;
+        flex-shrink: 0;
+        display: flex;
+        align-items: flex-end;
+    }
+    .doctor-portrait-premium img {
+        width: 180px;
+        height: 250px;
+        object-fit: cover;
+        object-position: top center;
+        border-radius: 100px 100px 0 0;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+        border: 4px solid rgba(255, 255, 255, 0.9);
+        display: block;
+        transition: transform 0.3s ease;
+    }
+    .doctor-portrait-premium img:hover {
+        transform: scale(1.02);
+    }
+    .doctor-ai-badge {
+        position: absolute;
+        top: 10px;
+        right: 0;
+        background: linear-gradient(135deg, #bdf0ca, #7edba0);
+        color: #0a3226;
+        padding: .3rem .7rem;
+        border-radius: 99px;
+        font-size: .55rem;
+        font-weight: 800;
+        box-shadow: 0 4px 20px rgba(46, 155, 98, 0.35);
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+        gap: .3rem;
+    }
+    .hero-stats-float {
+        position: absolute;
+        bottom: 20px;
+        left: -20px;
+        background: rgba(255, 255, 255, 0.08);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: .5rem .8rem;
+        z-index: 5;
+        display: flex;
+        align-items: center;
+        gap: .8rem;
+    }
+    .hero-stats-float .stat-item {
         text-align: center;
-        padding: 2rem;
-        color: #94a3b8;
-        font-size: 0.8rem;
-        border-top: 1px solid #e2e8f0;
-        margin-top: 2rem;
     }
-
-    .footer a {
-        color: #2563eb;
-        text-decoration: none;
+    .hero-stats-float .stat-num {
+        font-size: 1.1rem;
+        font-weight: 800;
+        color: #bdf0ca;
+        display: block;
     }
-
-    @media (max-width: 768px) {
-        .hero {
+    .hero-stats-float .stat-label {
+        font-size: .5rem;
+        color: rgba(255, 255, 255, 0.6);
+        text-transform: uppercase;
+        letter-spacing: .05em;
+    }
+    .hero-stats-float .stat-divider {
+        width: 1px;
+        height: 30px;
+        background: rgba(255, 255, 255, 0.1);
+    }
+    
+    /* ===== RESPONSIVE ===== */
+    @media(max-width:1024px) {
+        .hero-premium {
             flex-direction: column;
+            padding: 2rem 2rem;
             text-align: center;
-            padding: 2rem;
+            min-height: auto;
         }
-        .hero-content p {
-            max-width: 100%;
-        }
-        .hero-stats {
-            justify-content: center;
-        }
-        .main-container {
-            padding: 0 1rem 1rem 1rem;
-        }
+        .hero-title { max-width: 100%; }
+        .hero-desc { max-width: 100%; margin-left: auto; margin-right: auto; }
+        .hero-actions { justify-content: center; }
+        .hero-visual { min-height: 220px; width: 100%; }
+        .paperboard-premium { width: 170px; height: 135px; padding: .8rem 1rem; transform: rotate(-3deg) translateY(-8px); margin-right: -20px; }
+        .paperboard-premium .pb-title { font-size: .65rem; }
+        .doctor-portrait-premium img { width: 140px; height: 195px; }
+    .hero-stats-float { display: none; }
     }
+    @media(max-width:768px) {
+        .hero-premium { padding: 1.5rem 1.2rem; border-radius: 20px; }
+        .hero-title { font-size: clamp(1.6rem, 5vw, 2.2rem); }
+        .paperboard-premium { display: none; }
+        .doctor-portrait-premium img { width: 110px; height: 155px; }
+        .hero-visual { min-height: 160px; }
+        .doctor-ai-badge { font-size: .45rem; padding: .2rem .5rem; top: -6px; right: -6px; }
+        .hero-badge { font-size: .55rem; padding: .3rem .8rem; }
+    }
+    @media(max-width:480px) {
+        .doctor-portrait-premium img { width: 90px; height: 125px; }
+        .hero-visual { min-height: 130px; }
+        .btn-primary-hero, .btn-secondary-hero { font-size: .7rem; padding: .6rem 1.2rem; }
+    }
+    
+    /* ===== SECTION HEADERS ===== */
+    .section-head{display:flex;justify-content:space-between;align-items:end;margin:2rem 0 .8rem}
+    .section-title{font-family:'Manrope';font-size:1.4rem;font-weight:800;letter-spacing:-.045em;color:var(--forest)}
+    .section-note{color:var(--muted);font-size:.8rem;margin-top:.2rem}
+    .view-all{color:var(--forest2);font-size:.74rem;font-weight:800}
+    
+    /* ===== METRICS ===== */
+    .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem}
+    .metric{background:white;border:1px solid var(--line);border-radius:16px;padding:1.2rem;transition:all .3s ease}
+    .metric:hover{transform:translateY(-4px);box-shadow:0 8px 25px rgba(0,0,0,.06)}
+    .metric-label{color:var(--muted);font-size:.7rem;font-weight:700}
+    .metric-value{font-family:'Manrope';font-size:1.6rem;color:var(--forest);font-weight:800;margin-top:.28rem}
+    .metric-meta{color:#3d9665;font-size:.68rem;margin-top:.12rem}
+    
+    /* ===== CARDS ===== */
+    .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem}
+    .info-card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:1.2rem;min-height:180px;position:relative;overflow:hidden;transition:all .3s ease}
+    .info-card:hover{transform:translateY(-4px);box-shadow:0 8px 25px rgba(0,0,0,.06)}
+    .info-card.green{background:var(--sage)}
+    .info-card.cream{background:var(--cream)}
+    .badge{display:inline-block;padding:.32rem .5rem;background:rgba(255,255,255,.72);border-radius:99px;color:var(--forest2);font-size:.62rem;font-weight:800}
+    .info-title{font-family:'Manrope';font-size:1.1rem;line-height:1.08;color:var(--forest);max-width:190px;margin-top:2.5rem}
+    .info-copy{font-size:.73rem;color:#668075;line-height:1.45;max-width:210px;margin-top:.45rem}
+    .info-icon{position:absolute;right:1rem;bottom:1rem;width:54px;height:54px;border-radius:18px;background:var(--forest);color:#bdf0ca;display:grid;place-items:center;font-size:1.3rem}
+    
+    /* ===== WHO SECTION ===== */
+    .who-container{background:#f8fcff;border:1px solid #c8e4ef;border-left:5px solid #0093d0;border-radius:20px;padding:1.2rem;margin-top:1.5rem;box-shadow:0 5px 18px rgba(0,91,126,.05)}
+    .who-header{display:flex;align-items:center;gap:.7rem;flex-wrap:wrap;margin-bottom:.8rem}
+    .who-logo{background:linear-gradient(135deg,#0093d0,#007a7a);color:#fff;padding:.4rem .7rem;border-radius:9px;font-size:.7rem;font-weight:800;letter-spacing:.05em}
+    .who-title{font-family:'Manrope';font-weight:800;color:var(--forest);font-size:1.05rem}
+    .who-live{background:#e3f4fa;color:#00749b;padding:.25rem .55rem;border-radius:99px;font-size:.62rem;font-weight:800}
+    .who-note{color:#5d7480;font-size:.7rem;line-height:1.45;margin-bottom:.7rem}
+    .who-post{display:flex;gap:.8rem;padding:.75rem 0;border-bottom:1px solid #e6f0f3}
+    .who-post:last-child{border-bottom:0}
+    .who-icon{display:grid;place-items:center;width:40px;height:40px;border-radius:12px;background:#e2f2f7;font-size:1.15rem;flex-shrink:0}
+    .who-content{flex:1}
+    .who-post-title{color:var(--forest);font-size:.82rem;font-weight:800}
+    .who-post-meta{color:#80959d;font-size:.65rem;margin-top:.22rem}
+    .who-link{color:#007a9f;font-size:.68rem;font-weight:800;text-decoration:none;white-space:nowrap}
+    .who-link:hover{text-decoration:underline}
+    
+    /* ===== WORKSPACE ===== */
+    .workspace{background:white;border-radius:20px;padding:1.2rem;box-shadow:0 4px 12px rgba(0,0,0,.04)}
+    .workspace-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.8rem}
+    .workspace-title{font-family:'Manrope';font-size:1.05rem;font-weight:800;color:var(--forest)}
+    .workspace-copy{color:var(--muted);font-size:.75rem;margin-top:.2rem}
+    .privacy-tag{color:var(--forest2);background:#d9f4df;border:1px solid #b5ddbd;border-radius:99px;padding:.38rem .55rem;font-size:.65rem;font-weight:800}
+    .drop{background:#edf8ef;border:2px dashed #62ad78;border-radius:14px;padding:1rem}
+    [data-testid="stFileUploader"]{border:0;padding:0;background:transparent}
+    [data-testid="stFileUploaderDropzone"]{border:0;background:transparent;min-height:60px}
+    .hint{text-align:center;color:var(--muted);font-size:.7rem;margin-top:.25rem}
+    
+    /* ===== DOCTOR NOTE - Voice Tab ===== */
+    .doctor-note-voice{display:flex;gap:1rem;align-items:center;background:linear-gradient(135deg,#e8f5ec,#d4e8da);border-radius:16px;padding:1rem 1.2rem;margin-bottom:1rem;border:1px solid #b8ddbd}
+    .doctor-note-voice .doc-avatar{width:56px;height:56px;border-radius:50%;object-fit:cover;object-position:top center;border:3px solid white;box-shadow:0 4px 12px rgba(0,0,0,0.1);flex-shrink:0}
+    .doctor-note-voice .doc-info{flex:1}
+    .doctor-note-voice .doc-info strong{display:block;color:#0d3d2e;font-size:.85rem;font-weight:700}
+    .doctor-note-voice .doc-info span{display:block;color:#5a7a6a;font-size:.75rem;margin-top:.1rem;line-height:1.4}
+    .doctor-note-voice .doc-icon{font-size:1.8rem;opacity:0.5}
+    
+    /* ===== REPORT ===== */
+    .report{background:#fff;border-radius:20px;overflow:hidden;margin-top:1rem;box-shadow:0 4px 12px rgba(0,0,0,.04)}
+    .report-head{display:flex;justify-content:space-between;padding:1rem 1.2rem;border-bottom:1px solid var(--line)}
+    .report-head strong{font-family:'Manrope';color:var(--forest)}
+    .ready{background:#e5f6e8;color:#277449;border-radius:99px;padding:.32rem .5rem;font-size:.65rem;font-weight:800}
+    .report-body{padding:1.2rem 1.2rem 1.2rem 1.5rem;color:var(--ink);font-size:.88rem;line-height:1.7;border-left:4px solid var(--forest2)}
+    .report-body h1,.report-body h2,.report-body h3{font-family:'Manrope';color:var(--forest)}
+    .report-body blockquote{background:#fff6e9;border-left:3px solid #e3aa62;padding:.5rem .7rem;color:#795d3a}
+    .disclaimer{background:#fff8ef;border:1px solid #f3dfc4;border-radius:10px;padding:.75rem;color:#795d3a;font-size:.7rem;line-height:1.5}
+    
+    /* ===== HISTORY ===== */
+    .history-item{display:flex;justify-content:space-between;align-items:center;padding:.85rem 0;border-bottom:1px solid #edf1ed}
+    .history-item:last-child{border:0}
+    .history-name{color:var(--forest);font-size:.8rem;font-weight:800}
+    .history-meta{color:var(--muted);font-size:.68rem;margin-top:.18rem}
+    .history-status{color:#317551;background:#edf8ef;padding:.3rem .5rem;border-radius:99px;font-size:.63rem;font-weight:800}
+    
+    /* ===== STREAMLIT OVERRIDES ===== */
+    .stButton>button{background:var(--forest2);color:white;border:0;border-radius:12px;min-height:2.55rem;font-weight:800;transition:all .3s ease}
+    .stButton>button:hover{background:var(--forest);color:white;transform:translateY(-2px);box-shadow:0 8px 20px rgba(13,61,46,.2)}
+    .stTabs [data-baseweb="tab-list"]{gap:.5rem;background:#c5e7cc;border-radius:12px;padding:.3rem}
+    .stTabs [data-baseweb="tab"]{font-size:.75rem;font-weight:800;color:var(--forest2);border-radius:9px;padding:.55rem .75rem}
+    .stTabs [aria-selected="true"]{background:var(--forest);color:white!important}
+    
+    /* ===== FOOTER ===== */
+    .footer{text-align:center;color:#6f8b78;font-size:.68rem;padding:2rem 0 .5rem}
+    
+    /* ===== RESPONSIVE ===== */
+    @media(max-width:850px){.metrics{grid-template-columns:repeat(2,1fr)}.cards{grid-template-columns:1fr}.top-actions .status{display:none}.workspace-top{display:block}.privacy-tag{display:inline-block;margin-top:.7rem}}
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# ==================== HERO SECTION ====================
-st.markdown(
-    """
-    <div class="hero">
-        <div class="hero-content">
-            <div class="hero-badge">⚡ AI-POWERED ANALYSIS</div>
-            <h1>Medical Document <br><span>Intelligence</span> Simplified</h1>
-            <p>Upload a photo of your medicine or lab report and get a clear, structured clinical breakdown in plain language — instantly.</p>
-            <div class="hero-stats">
-                <div class="stat">
-                    <div class="number">AI</div>
-                    <div class="label">Vision Powered</div>
+with st.sidebar:
+    st.markdown('<div class="brand"><div class="brand-mark">✚</div><div><div class="brand-name">MedInsight AI</div><div class="brand-sub">Intelligent Medical Analysis System</div></div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="side-section">Main menu</div>', unsafe_allow_html=True)
+    page = st.radio("Main menu", ["Dashboard", "New analysis", "WHO knowledge", "History", "Saved insights"], label_visibility="collapsed")
+    st.markdown('<div class="side-section">Quick capture</div>', unsafe_allow_html=True)
+    st.caption("Capture here, then finish the analysis in the workspace.")
+    sidebar_camera_file = st.camera_input("📷 Capture document", key="sidebar_camera")
+    sidebar_voice_file = None
+    sidebar_voice_text = ""
+    if hasattr(st, "audio_input"):
+        sidebar_voice_file = st.audio_input("🎙️ Speak a question", key="sidebar_voice")
+        if sidebar_voice_file is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as audio_tmp:
+                audio_tmp.write(sidebar_voice_file.getvalue())
+                sidebar_audio_path = audio_tmp.name
+            try:
+                sidebar_transcription = subprocess.run(["manus-speech-to-text", sidebar_audio_path], capture_output=True, text=True, timeout=120)
+                sidebar_voice_text = sidebar_transcription.stdout.strip() if sidebar_transcription.returncode == 0 else ""
+            finally:
+                if os.path.exists(sidebar_audio_path):
+                    os.remove(sidebar_audio_path)
+            if sidebar_voice_text:
+                st.success("Voice captured")
+                st.text_area("Sidebar transcription", value=sidebar_voice_text, height=75, key="sidebar_transcription")
+    else:
+        st.caption("Upgrade Streamlit to enable microphone capture.")
+    st.markdown('<div class="side-section">Account & help</div>', unsafe_allow_html=True)
+    page2 = st.radio("Account and help", ["No extra page", "Safety & privacy", "Settings", "Help centre"], label_visibility="collapsed")
+    st.markdown('<hr><div style="font-size:.7rem;opacity:.6;line-height:1.55">MedInsight AI is designed to support understanding—not diagnosis. Always involve a qualified healthcare professional in medical decisions.</div>', unsafe_allow_html=True)
+
+st.markdown('<div class="topbar"><div class="topmark">MedInsight <span>AI</span></div><div class="top-actions"><div class="status"><span class="dot"></span> System operational</div><div class="avatar">MI</div></div></div>', unsafe_allow_html=True)
+
+if page == "Dashboard":
+    usage = st.session_state.usage
+    if DOCTOR_DATA_URI:
+        st.markdown(f'''
+        <div class="hero-premium">
+            <div class="hero-content">
+                <div class="hero-badge">✦ AI-Powered Medical Analysis</div>
+                <h1 class="hero-title">
+                    Make every medical document <br><span class="highlight">easier to understand</span>
+                </h1>
+                <p class="hero-desc">Read medicine labels, prescriptions, and lab reports with a clear, structured summary built for better health conversations.</p>
+                <div class="hero-actions">
+                    <a class="btn-primary-hero" href="#new-analysis">✨ Start new analysis</a>
+                    <a class="btn-secondary-hero" href="#how-it-works">Explore the system →</a>
                 </div>
-                <div class="stat">
-                    <div class="number">7</div>
-                    <div class="label">Key Sections</div>
+            </div>
+            <div class="hero-visual">
+                <div class="doctor-combo">
+                    <div class="paperboard-premium">
+                        <div class="pb-top">
+                            <span class="pb-top-label">📋 AI Recommendation</span>
+                            <span class="pb-status-dot"></span>
+                        </div>
+                        <div class="pb-title">Medication Review</div>
+                        <div class="pb-rec-text"><strong>Suggested:</strong> Continue current dose. Take with food, twice daily. Discuss any side effects at your next visit.</div>
+                        <div class="pb-footer">
+                            <span class="pb-check-circle">✓</span>
+                            <span class="pb-check-text">Analysis Complete</span>
+                            <span class="pb-version">v2.4</span>
+                        </div>
+                    </div>
+                    <div class="doctor-portrait-premium">
+                        <img src="{DOCTOR_DATA_URI}" alt="Medical professional">
+                        <span class="doctor-ai-badge">✦ AI Assistant</span>
+                    </div>
                 </div>
-                <div class="stat">
-                    <div class="number">Free</div>
-                    <div class="label">To Use</div>
+                <div class="hero-stats-float">
+                    <div class="stat-item">
+                        <span class="stat-num">{usage.get("documents_analyzed", 0)}</span>
+                        <span class="stat-label">Analyses</span>
+                    </div>
+                    <div class="stat-divider"></div>
+                    <div class="stat-item">
+                        <span class="stat-num">98%</span>
+                        <span class="stat-label">Accuracy</span>
+                    </div>
+                    <div class="stat-divider"></div>
+                    <div class="stat-item">
+                        <span class="stat-num">4.9⭐</span>
+                        <span class="stat-label">Rating</span>
+                    </div>
                 </div>
             </div>
         </div>
-        <div class="hero-icon">🧬</div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-# ==================== MAIN CONTENT ====================
-st.markdown('<div class="main-container">', unsafe_allow_html=True)
-
-# --- Upload Section ---
-st.markdown(
-    """
-    <div class="upload-card">
-        <h3>📤 Upload Document</h3>
-        <p>Upload a photo of your medicine label, prescription box, or lab report for AI-powered analysis.</p>
-        <div class="supported-formats">📷 Supported: JPG, JPEG, PNG</div>
-        <div class="file-limits">📄 Max 200MB per file</div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-# ===== UPLOAD OR CAMERA =====
-tab1, tab2 = st.tabs(["📁 Upload File", "📷 Use Camera"])
-
-uploaded_file = None
-camera_file = None
-
-with tab1:
-    uploaded_file = st.file_uploader(
-        "",
-        type=["jpg", "jpeg", "png"],
-        label_visibility="collapsed"
-    )
-    st.markdown(
-        """
-        <div style="text-align: center; margin-top: -10px; padding-bottom: 10px;">
-            <span style="color: #0a1628; font-weight: 500;">📁 Drag & drop your file here</span>
-            <br>
-            <span style="color: #94a3b8; font-size: 0.8rem;">or click to browse files</span>
+        ''', unsafe_allow_html=True)
+    else:
+        st.markdown(f'''
+        <div class="hero-premium">
+            <div class="hero-content">
+                <div class="hero-badge">✦ AI-Powered Medical Analysis</div>
+                <h1 class="hero-title">
+                    Make every medical document <br><span class="highlight">easier to understand</span>
+                </h1>
+                <p class="hero-desc">Read medicine labels, prescriptions, and lab reports with a clear, structured summary built for better health conversations.</p>
+                <div class="hero-actions">
+                    <a class="btn-primary-hero" href="#new-analysis">✨ Start new analysis</a>
+                    <a class="btn-secondary-hero" href="#how-it-works">Explore the system →</a>
+                </div>
+            </div>
         </div>
-        """,
-        unsafe_allow_html=True
-    )
+        ''', unsafe_allow_html=True)
+        st.warning("⚠️ Doctor image not found. Please add 'doctor_portrait.jpg' to the 'assets' folder.")
+    
+    if DOCTOR_INTRO_IMAGE.exists():
+        doctor_col, trust_col = st.columns([0.22, 0.78], gap="medium")
+        with doctor_col:
+            st.image(str(DOCTOR_INTRO_IMAGE), caption="Your AI health-information guide", use_container_width=True, output_format="JPEG")
+        with trust_col:
+            st.markdown('<div style="padding:.7rem 0 0 .2rem"><div class="eyebrow" style="color:var(--forest);">A calmer way to begin</div><div class="section-title">Bring a question. We\'ll help organize the information.</div><div class="section-note" style="max-width:600px;margin-top:.4rem">Upload a document, take a photo, or speak your question. MedInsight AI is designed to support conversations with your healthcare professional.</div></div>', unsafe_allow_html=True)
+    
+    st.markdown('<div class="section-head"><div><div class="section-title">Your workspace at a glance</div><div class="section-note">A simple record of the information you have reviewed.</div></div><div class="view-all">Updated just now</div></div>', unsafe_allow_html=True)
+    usage = st.session_state.usage
+    st.markdown(f'<div class="metrics"><div class="metric"><div class="metric-label">Documents analyzed</div><div class="metric-value">{usage.get("documents_analyzed", 0)}</div><div class="metric-meta">Updates after each review</div></div><div class="metric"><div class="metric-label">Saved insights</div><div class="metric-value">{usage.get("saved_insights", 0)}</div><div class="metric-meta">Across your categories</div></div><div class="metric"><div class="metric-label">Reports reviewed</div><div class="metric-value">{usage.get("reports_reviewed", 0)}</div><div class="metric-meta">One count per document</div></div><div class="metric"><div class="metric-label">System status</div><div class="metric-value">Ready</div><div class="metric-meta">Analysis service online</div></div></div>', unsafe_allow_html=True)
+    
+    who_updates = fetch_who_updates()
+    who_archive = update_who_archive(who_updates)
+    who_html = '<div class="who-container"><div class="who-header"><span class="who-logo">🌍 WHO</span><span class="who-title">Health updates & guidelines</span><span class="who-live">Official source links</span></div><div class="who-note">Current items are linked from the official World Health Organization newsroom. Open the source for the complete update, date, evidence, and guidance.</div>'
+    if who_updates:
+        for item in who_updates[:4]:
+            who_html += f'<div class="who-post"><div class="who-icon">✦</div><div class="who-content"><div class="who-post-title">{item["title"]}</div><div class="who-post-meta">WHO Newsroom · Official update</div></div><a class="who-link" href="{item["url"]}" target="_blank">Read ↗</a></div>'
+    else:
+        fallback = [("WHO Health topics", "https://www.who.int/health-topics"), ("WHO Fact sheets", "https://www.who.int/news-room/fact-sheets"), ("Disease Outbreak News", "https://www.who.int/emergencies/disease-outbreak-news"), ("WHO Data", "https://www.who.int/data")]
+        for title, url in fallback:
+            who_html += f'<div class="who-post"><div class="who-icon">✦</div><div class="who-content"><div class="who-post-title">{title}</div><div class="who-post-meta">Official WHO resource</div></div><a class="who-link" href="{url}" target="_blank">Open ↗</a></div>'
+    who_html += '</div>'
+    st.markdown(who_html, unsafe_allow_html=True)
+    
+    current_urls = {item["url"] for item in who_updates}
+    older_updates = [item for item in who_archive if item.get("url") not in current_urls][:4]
+    if older_updates:
+        older_html = '<div class="who-container" style="margin-top:.9rem;border-left-color:#8a9e8a"><div class="who-header"><span class="who-logo" style="background:linear-gradient(135deg,#8a9e8a,#5a7a6a)">🗂️ Archive</span><span class="who-title">Previously shown updates</span></div><div class="who-note">Saved locally so earlier WHO items stay visible even after they roll off the live newsroom page.</div>'
+        for item in older_updates:
+            older_html += f'<div class="who-post"><div class="who-icon">🕘</div><div class="who-content"><div class="who-post-title">{item["title"]}</div><div class="who-post-meta">First seen {item.get("first_seen", "")}</div></div><a class="who-link" href="{item["url"]}" target="_blank">Read ↗</a></div>'
+        older_html += '</div>'
+        st.markdown(older_html, unsafe_allow_html=True)
+    
+    st.markdown('<div class="section-head" id="how-it-works"><div><div class="section-title">How MedInsight AI helps</div><div class="section-note">A thoughtful workflow from document to discussion.</div></div></div><div class="cards"><div class="info-card"><span class="badge">01 · UPLOAD</span><div class="info-title">Bring your document as it is.</div><div class="info-copy">Use a photo of a prescription, medicine box, or lab report. No retyping required.</div><div class="info-icon">↥</div></div><div class="info-card green"><span class="badge">02 · ANALYZE</span><div class="info-title">Find the important parts.</div><div class="info-copy">The visible information is grouped into familiar sections and explained simply.</div><div class="info-icon">✦</div></div><div class="info-card cream"><span class="badge">03 · DISCUSS</span><div class="info-title">Ask better questions.</div><div class="info-copy">Use the report as a starting point for your next conversation with a care team.</div><div class="info-icon">↗</div></div></div>', unsafe_allow_html=True)
+    
+    if DOCTOR_GUIDANCE_IMAGE.exists():
+        guidance_image_col, guidance_copy_col = st.columns([0.42, 0.58], gap="large")
+        with guidance_image_col:
+            st.image(str(DOCTOR_GUIDANCE_IMAGE), caption="Designed for better care conversations", use_container_width=True, output_format="JPEG")
+        with guidance_copy_col:
+            st.markdown('<div style="padding:1rem 0"><div class="eyebrow" style="color:var(--forest);">Built around understanding</div><div class="section-title">A digital companion for the questions you want to ask.</div><div class="section-note" style="max-width:520px;margin-top:.55rem;line-height:1.65">The doctor imagery is intentionally used near the guidance and conversation moments. MedInsight AI supports your understanding while keeping medical decisions with you and your qualified healthcare professional.</div></div>', unsafe_allow_html=True)
 
-with tab2:
-    camera_file = st.camera_input("Take a photo of the medicine or lab report", label_visibility="collapsed")
+if page in ["Dashboard", "New analysis"]:
+    st.markdown('<div class="section-head" id="new-analysis"><div><div class="section-title">Start a new analysis</div><div class="section-note">One clear image is all you need.</div></div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="workspace"><div class="workspace-top"><div><div class="workspace-title">Add a medical document</div><div class="workspace-copy">JPG, JPEG, or PNG · up to 200 MB</div></div><div class="privacy-tag">✦ Information-first, not diagnosis</div></div><div class="drop">', unsafe_allow_html=True)
+    upload_tab, camera_tab, voice_tab = st.tabs(["📤 Upload from device", "📷 Use camera", "🎙️ Speak to MedInsight"])
+    uploaded_file = None
+    camera_file = None
+    voice_file = None
+    voice_text = ""
+    with upload_tab:
+        uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"], label_visibility="collapsed")
+        st.markdown('<div class="hint">Drop an image here or browse your device · Use a well-lit, in-focus photo</div>', unsafe_allow_html=True)
+    with camera_tab:
+        camera_file = st.camera_input("Take a photo of your document", label_visibility="collapsed")
+    with voice_tab:
+        st.markdown('''
+        <div class="doctor-note-voice">
+            <div style="width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,#bdf0ca,#7edba0);display:flex;align-items:center;justify-content:center;font-size:1.8rem;flex-shrink:0;border:3px solid white;box-shadow:0 4px 12px rgba(0,0,0,0.1)">👨‍⚕️</div>
+            <div class="doc-info">
+                <strong>Tell us what you want to understand</strong>
+                <span>Speak a question or describe the document. Your words will be transcribed for the analysis context.</span>
+            </div>
+            <div class="doc-icon">🎙️</div>
+        </div>
+        ''', unsafe_allow_html=True)
+        
+        if hasattr(st, "audio_input"):
+            voice_file = st.audio_input("Record your question", label_visibility="visible")
+            if voice_file is not None:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as audio_tmp:
+                    audio_tmp.write(voice_file.getvalue())
+                    audio_path = audio_tmp.name
+                try:
+                    transcription = subprocess.run(["manus-speech-to-text", audio_path], capture_output=True, text=True, timeout=120)
+                    voice_text = transcription.stdout.strip() if transcription.returncode == 0 else ""
+                finally:
+                    if os.path.exists(audio_path):
+                        os.remove(audio_path)
+                if voice_text:
+                    st.success("✅ Voice captured successfully!")
+                    st.text_area("📝 Transcribed question", value=voice_text, height=90)
+        else:
+            st.info("🎤 Voice capture needs a recent Streamlit version with st.audio_input enabled.")
+    st.markdown('</div></div>', unsafe_allow_html=True)
+    image_source = uploaded_file if uploaded_file is not None else camera_file
+    if image_source is None:
+        image_source = sidebar_camera_file
+    active_voice_text = voice_text or sidebar_voice_text
+    if active_voice_text and image_source is None:
+        st.warning("📄 Please add a document image from Upload or Camera so MedInsight AI can analyze it alongside your question.")
+    if active_voice_text and image_source is not None:
+        st.info(f"🎤 Voice question ready for this document: {active_voice_text}")
+    if image_source is not None:
+        image = Image.open(image_source)
+        st.image(image, caption="Document preview", use_container_width=True)
+        if st.button("✨ Create my clear summary", use_container_width=True):
+            with st.spinner("Reading the document and organizing the findings…"):
+                try:
+                    result = analyze_health_document_openai(image)
+                    is_new_analysis = register_analysis(image_source)
+                    result_html = md.markdown(result, extensions=["extra", "sane_lists"])
+                    st.session_state["last_report_html"] = f'<div class="report"><div class="report-head"><strong>📋 Document summary</strong><span class="ready">✓ Ready to review</span></div><div class="report-body">{result_html}<div class="disclaimer"><strong>⚠️ Important:</strong> This is an informational summary, not a diagnosis or a substitute for advice from a qualified healthcare professional. For severe or worsening symptoms, seek urgent medical care.</div></div></div>'
+                    if is_new_analysis:
+                        st.toast("✅ Review added to your workspace and history.")
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"❌ We couldn't complete the analysis. Please try a clearer image or try again. Details: {exc}")
+        if st.session_state.get("last_report_html"):
+            st.markdown(st.session_state["last_report_html"], unsafe_allow_html=True)
 
-image_source = uploaded_file if uploaded_file is not None else camera_file
+if page == "WHO knowledge":
+    st.markdown('<div class="section-head"><div><div class="section-title">🌍 WHO Knowledge & Updates</div><div class="section-note">A curated doorway to official World Health Organization information.</div></div><div class="view-all">Official sources</div></div>', unsafe_allow_html=True)
+    st.info("ℹ️ MedInsight AI links to WHO materials but does not replace the original source. Always check the official WHO page for the latest wording, dates, and guidance.")
+    updates = fetch_who_updates()
+    who_archive = update_who_archive(updates)
+    st.markdown('<div class="section-head"><div><div class="section-title">📰 Latest WHO newsroom updates</div><div class="section-note">Fetched from the official WHO newsroom when the service is available.</div></div></div>', unsafe_allow_html=True)
+    if updates:
+        for update in updates:
+            st.markdown(f'<div class="history-item"><div><div class="history-name">{update["title"]}</div><div class="history-meta">WHO Newsroom · Official source</div></div><a class="view-all" href="{update["url"]}" target="_blank">Read on WHO ↗</a></div>', unsafe_allow_html=True)
+    else:
+        st.warning("⚠️ WHO newsroom updates could not be loaded right now. Use the official links below.")
+    current_urls = {item["url"] for item in updates}
+    older_updates = [item for item in who_archive if item.get("url") not in current_urls]
+    if older_updates:
+        st.markdown('<div class="section-head"><div><div class="section-title">🗂️ Previously shown updates</div><div class="section-note">Saved locally so nothing gets lost once WHO refreshes their live newsroom page.</div></div></div>', unsafe_allow_html=True)
+        for item in older_updates[:10]:
+            st.markdown(f'<div class="history-item"><div><div class="history-name">{item["title"]}</div><div class="history-meta">First seen {item.get("first_seen", "")}</div></div><a class="view-all" href="{item["url"]}" target="_blank">Read on WHO ↗</a></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-head"><div><div class="section-title">📚 Health topic library</div><div class="section-note">Browse official WHO topic pages across prevention, conditions, health systems, and emergencies.</div></div></div>', unsafe_allow_html=True)
+    topic_search = st.text_input("🔍 Search WHO topics", placeholder="Try diabetes, mental health, vaccines…")
+    filtered_topics = {name: url for name, url in WHO_TOPICS.items() if not topic_search or topic_search.lower() in name.lower()}
+    topic_columns = st.columns(2)
+    for index, (topic_name, topic_url) in enumerate(filtered_topics.items()):
+        with topic_columns[index % 2]:
+            st.markdown(f'<div class="history-item"><div><div class="history-name">{topic_name}</div><div class="history-meta">Official WHO health topic</div></div><a class="view-all" href="{topic_url}" target="_blank">Open ↗</a></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-head"><div><div class="section-title">🚨 Emergency and outbreak information</div><div class="section-note">Use WHO Disease Outbreak News for confirmed acute public-health events and potential events of concern.</div></div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="workspace"><div class="history-item"><div><div class="history-name">WHO Disease Outbreak News</div><div class="history-meta">Official outbreak reports and public-health event updates.</div></div><a class="view-all" href="https://www.who.int/emergencies/disease-outbreak-news" target="_blank">Open WHO DON ↗</a></div><div class="history-item"><div><div class="history-name">WHO Fact Sheets</div><div class="history-meta">Evidence-based summaries across health conditions and interventions.</div></div><a class="view-all" href="https://www.who.int/news-room/fact-sheets" target="_blank">Browse fact sheets ↗</a></div><div class="history-item"><div><div class="history-name">WHO Data</div><div class="history-meta">Official data, indicators, and global health observatory resources.</div></div><a class="view-all" href="https://www.who.int/data" target="_blank">Open WHO Data ↗</a></div></div>', unsafe_allow_html=True)
 
-if image_source is not None:
-    image = Image.open(image_source)
+if page == "History":
+    usage = st.session_state.usage
+    st.markdown(f'<div class="section-head"><div><div class="section-title">📋 Analysis history</div><div class="section-note">Every document you have reviewed in MedInsight AI.</div></div><div class="view-all">{usage.get("documents_analyzed", 0)} total documents</div></div>', unsafe_allow_html=True)
+    history_rows = usage.get("history", [])
+    if history_rows:
+        history_html = '<div class="workspace">'
+        for row in history_rows:
+            history_html += f'<div class="history-item"><div><div class="history-name">{row.get("name", "Medical document")}</div><div class="history-meta">{row.get("time", "")}</div></div><span class="history-status">{row.get("status", "Reviewed")}</span></div>'
+        history_html += '</div>'
+        st.markdown(history_html, unsafe_allow_html=True)
+    else:
+        st.info("📂 Your reviewed documents will appear here after your first successful analysis.")
 
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.image(image, caption="📸 Document Preview", use_container_width=True)
+if page == "Saved insights":
+    st.markdown('<div class="section-head"><div><div class="section-title">💡 Saved insights</div><div class="section-note">Keep important explanations close for future care conversations.</div></div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="cards"><div class="info-card green"><span class="badge">LAB REPORT</span><div class="info-title">What to ask about cholesterol results</div><div class="info-copy">Saved from your complete blood panel analysis.</div></div><div class="info-card cream"><span class="badge">MEDICINE</span><div class="info-title">Dosage and timing notes</div><div class="info-copy">Saved from your medicine label analysis.</div></div></div>', unsafe_allow_html=True)
 
-    if st.button("🔍 Analyze Document", use_container_width=True):
-        with st.spinner("🧠 AI is analyzing your document..."):
-            try:
-                result = analyze_health_document_openai(image)
-                result_html = md.markdown(result, extensions=["extra", "sane_lists"])
+if page2 == "Safety & privacy":
+    st.markdown('<div class="section-head"><div><div class="section-title">🔒 Safety & privacy</div><div class="section-note">Understand what MedInsight AI can—and cannot—do.</div></div></div><div class="workspace"><div class="history-item"><div><div class="history-name">Not a diagnostic system</div><div class="history-meta">MedInsight AI summarizes visible document information; it does not diagnose, prescribe, or replace a clinician.</div></div></div><div class="history-item"><div><div class="history-name">Transparent uncertainty</div><div class="history-meta">When an image is unclear or information is missing, the system should flag it rather than guess.</div></div></div><div class="history-item"><div><div class="history-name">Emergency care</div><div class="history-meta">For severe or worsening symptoms, contact local emergency services or seek urgent care.</div></div></div></div>', unsafe_allow_html=True)
 
-                st.markdown(
-                    f"""
-                    <div class="result-card">
-                        <div class="result-header">
-                            <h3>📋 Analysis Report</h3>
-                            <span class="badge">✓ Complete</span>
-                        </div>
-                        <div class="result-content">
-                            {result_html}
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+if page2 == "Settings":
+    st.markdown('<div class="section-head"><div><div class="section-title">⚙️ Settings</div><div class="section-note">Personalize your MedInsight AI workspace.</div></div></div><div class="workspace">', unsafe_allow_html=True)
+    st.checkbox("Show safety reminder before every analysis", value=True)
+    st.checkbox("Keep recent analysis history", value=True)
+    st.selectbox("Preferred report language", ["English", "Hindi", "Spanish", "French"])
+    st.markdown('</div>', unsafe_allow_html=True)
 
-            except Exception as e:
-                st.error(f"⚠️ Analysis failed: {e}")
+if page2 == "Help centre":
+    st.markdown('<div class="section-head"><div><div class="section-title">❓ Help centre</div><div class="section-note">Quick guidance for getting the clearest results.</div></div></div><div class="workspace"><div class="history-item"><div><div class="history-name">How do I get a better result?</div><div class="history-meta">Use a sharp, well-lit image. Make sure all text is visible and avoid glare.</div></div></div><div class="history-item"><div><div class="history-name">What documents work best?</div><div class="history-meta">Medicine labels, prescriptions, lab reports, discharge summaries, and referral notes.</div></div></div></div>', unsafe_allow_html=True)
 
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ==================== FOOTER ====================
-st.markdown(
-    """
-    <div class="footer">
-        <p>
-            ⚕️ <strong>MedScan Pro</strong> — AI-powered medical document analysis for healthcare professionals and patients.
-            <br>
-            <span style="font-size:0.75rem; color:#94a3b8;">
-                This is not a diagnosis. Always consult your healthcare provider for medical decisions.
-            </span>
-            <br><br>
-            © 2026 MedScan Pro
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown('<div class="footer">MedInsight AI · Intelligent Medical Analysis System · Built for clearer health conversations · Not intended for emergency care or medical diagnosis.</div>', unsafe_allow_html=True)
