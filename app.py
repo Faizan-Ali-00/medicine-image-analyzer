@@ -152,21 +152,20 @@ Use simple, everyday language, avoid jargon, or if you must use a medical term, 
 it in plain words. Use short bullet points, and for each point add one brief clause explaining WHY 
 it matters (not just WHAT it is), while still keeping the full answer within 1000 output tokens.
 
-If it is a MEDICINE, cover briefly using markdown headers like '### 1. What it treats':
-1. What it treats and how it works
-2. When it's prescribed
-3. How to take it (dosage basics)
-4. Side effects to watch for (common and serious)
-5. Who should NOT take it
-6. What to avoid while taking it (food and drugs)
-7. How to store it
+If the user asks about a specific medicine, provide information in this format:
+### 1. What it treats and how it works
+### 2. When it's prescribed
+### 3. How to take it (dosage basics)
+### 4. Side effects to watch for
+### 5. Who should NOT take it
+### 6. What to avoid while taking it
 
-If it is a LAB REPORT, use markdown headers for:
-1. Biomarker results (number, and whether Normal, High, or Low)
-2. What abnormal values mean, in one simple sentence each
-3. Overall summary in plain language, avoiding scary diagnostic labels
+If the user asks about a lab report or provides an image, use this format:
+### 1. Biomarker results (number, and whether Normal, High, or Low)
+### 2. What abnormal values mean, in one simple sentence each
+### 3. Overall summary in plain language
 
-If the user asks a specific question about the document, make sure to answer it directly in plain language."""
+Always answer the user's specific question directly and in plain language."""
 
 # --- STYLES ---
 st.markdown(
@@ -451,7 +450,6 @@ st.markdown(
     .stTabs [data-baseweb="tab"]{font-size:.7rem;font-weight:800;color:var(--forest2);border-radius:8px;padding:.45rem .7rem}
     .stTabs [aria-selected="true"]{background:var(--forest);color:white!important}
     
-    /* Fix for text input in voice tab */
     .stTextArea textarea {
         font-size: 0.9rem !important;
         border-radius: 12px !important;
@@ -606,15 +604,27 @@ if page == "Dashboard":
             st.markdown('<div style="padding:1rem 0"><div class="eyebrow" style="color:var(--forest);">Built around understanding</div><div class="section-title">A digital companion for the questions you want to ask.</div><div class="section-note" style="max-width:520px;margin-top:.55rem;line-height:1.65">The doctor imagery is intentionally used near the guidance and conversation moments. MedInsight AI supports your understanding while keeping medical decisions with you and your qualified healthcare professional.</div></div>', unsafe_allow_html=True)
 
 if page in ["Dashboard", "New analysis"]:
-    st.markdown('<div class="section-head" id="new-analysis"><div><div class="section-title">Start a new analysis</div><div class="section-note">Upload an image or take a photo, and ask your question.</div></div></div>', unsafe_allow_html=True)
-    st.markdown('<div class="workspace"><div class="workspace-top"><div><div class="workspace-title">Add a medical document</div><div class="workspace-copy">JPG, JPEG, or PNG · up to 200 MB</div></div><div class="privacy-tag">✦ Information-first, not diagnosis</div></div><div class="drop">', unsafe_allow_html=True)
+    st.markdown('<div class="section-head" id="new-analysis"><div><div class="section-title">Start a new analysis</div><div class="section-note">Upload an image or just ask about any medicine or health topic.</div></div></div>', unsafe_allow_html=True)
     
-    # Create tabs for upload, camera, and question
-    upload_tab, camera_tab, question_tab = st.tabs(["📤 Upload Image", "📷 Take Photo", "💬 Ask Question"])
+    # Create a cleaner layout
+    st.markdown('<div class="workspace"><div class="workspace-top"><div><div class="workspace-title">Ask about a medicine or upload a document</div><div class="workspace-copy">Type a medicine name OR upload an image. You can do both too!</div></div><div class="privacy-tag">✦ Information-first, not diagnosis</div></div><div class="drop">', unsafe_allow_html=True)
+    
+    # Simple question input at the top
+    user_question = st.text_input("💬 What do you want to know?", 
+                                  placeholder="e.g., paracetamol, blood test results, or ask about a specific medicine...",
+                                  key="simple_question")
+    
+    if user_question:
+        st.success(f"🔍 You asked: {user_question}")
+    
+    # Image upload section
+    st.markdown("---")
+    st.markdown("### 📤 Or upload a document image")
+    
+    upload_tab, camera_tab = st.tabs(["📤 Upload Image", "📷 Take Photo"])
     
     uploaded_file = None
     camera_file = None
-    user_question = ""
     
     with upload_tab:
         uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"], label_visibility="collapsed")
@@ -623,99 +633,78 @@ if page in ["Dashboard", "New analysis"]:
     with camera_tab:
         camera_file = st.camera_input("Take a photo of your document", label_visibility="collapsed")
     
-    with question_tab:
-        st.markdown('''
-        <div class="doctor-note-voice">
-            <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#bdf0ca,#7edba0);display:flex;align-items:center;justify-content:center;font-size:1.5rem;flex-shrink:0;border:3px solid white;box-shadow:0 4px 12px rgba(0,0,0,0.08)">💬</div>
-            <div class="doc-info">
-                <strong>What do you want to know?</strong>
-                <span>Ask about the medicine, lab results, or any part of the document.</span>
-            </div>
-            <div class="doc-icon">📝</div>
-        </div>
-        ''', unsafe_allow_html=True)
-        
-        user_question = st.text_area(
-            "Your question",
-            placeholder="e.g., What does this medicine do? How should I take it? What do these results mean?",
-            height=100,
-            key="user_question_input",
-            label_visibility="collapsed"
-        )
-        
-        if user_question:
-            st.success(f"✅ Question: {user_question[:100]}{'...' if len(user_question) > 100 else ''}")
-    
     st.markdown('</div></div>', unsafe_allow_html=True)
     
-    # Get the image source (uploaded or camera)
+    # Get the image source
     image_source = uploaded_file if uploaded_file is not None else camera_file
     if image_source is None:
         image_source = sidebar_camera_file
     
-    # Show preview if image is available
+    # Show what's happening
+    if user_question and image_source is None:
+        st.info(f"💡 You asked about '{user_question}'. Click 'Analyze' to get information about this medicine.")
+    elif user_question and image_source is not None:
+        st.info(f"💡 You asked about '{user_question}' and uploaded a document. Click 'Analyze' for both.")
+    elif image_source is not None and not user_question:
+        st.info("📷 Document uploaded. Click 'Analyze' to read and explain it.")
+    
+    # Preview image if available
     if image_source is not None:
         image = Image.open(image_source)
         st.image(image, caption="Document preview", use_container_width=True)
-        
-        # Show the question if asked
-        if user_question:
-            st.info(f"💬 Your question: {user_question}")
-        elif user_question == "" and image_source is not None:
-            st.info("💡 You can ask a specific question about this document in the 'Ask Question' tab above.")
-        
-        # Analysis button
-        if st.button("✨ Analyze Document", use_container_width=True):
-            with st.spinner("Reading the document and analyzing your question..."):
-                try:
-                    # Get the analysis result from the image
+    
+    # Analysis button
+    if st.button("✨ Analyze", use_container_width=True):
+        with st.spinner("Analyzing..."):
+            try:
+                # Get analysis result
+                if image_source is not None:
                     result = analyze_health_document_openai(image)
-                    
-                    # If user asked a question, add it to the analysis
-                    if user_question:
-                        # Prepend the question to the analysis
-                        full_prompt = f"User's question: {user_question}\n\nPlease analyze this medical document and specifically answer the user's question. Use simple, everyday language.\n\n{result}"
-                        # We need to pass this to the AI - this depends on how analyze_health_document_openai works
-                        # For now, we'll just append the question to the result
-                        result = f"**Your question:** {user_question}\n\n{result}"
-                    
+                else:
+                    # If no image, use the question as the prompt
+                    result = f"Please provide information about: {user_question}"
+                
+                # Add user question if provided
+                if user_question:
+                    if image_source is not None:
+                        result = f"User asked: {user_question}\n\nBased on the document provided:\n\n{result}"
+                    else:
+                        result = f"Information about: {user_question}\n\n{result}"
+                
+                # Register analysis if image was used
+                if image_source is not None:
                     is_new_analysis = register_analysis(image_source)
-                    result_html = md.markdown(result, extensions=["extra", "sane_lists"])
-                    
-                    report_html = f'''
-                    <div class="report-container">
-                        <div class="report-header">
-                            <span class="report-title">📋 Analysis Report</span>
-                            <span class="report-badge">✓ Ready to review</span>
-                        </div>
-                        <div class="report-body-wrapper">
-                            <div class="report-body">
-                                {result_html}
-                            </div>
-                        </div>
-                        <div class="report-disclaimer">
-                            <div class="disclaimer-box">
-                                <strong>⚠️ Important:</strong> This is an informational summary, not a diagnosis or a substitute for advice from a qualified healthcare professional. For severe or worsening symptoms, seek urgent medical care.
-                            </div>
-                        </div>
-                    </div>
-                    '''
-                    
-                    st.session_state["last_report_html"] = report_html
                     if is_new_analysis:
                         st.toast("✅ Review added to your workspace and history.")
-                        st.rerun()
-                except Exception as exc:
-                    st.error(f"❌ We couldn't complete the analysis. Please try a clearer image or try again. Details: {exc}")
-        
-        if st.session_state.get("last_report_html"):
-            st.markdown(st.session_state["last_report_html"], unsafe_allow_html=True)
+                
+                result_html = md.markdown(result, extensions=["extra", "sane_lists"])
+                
+                report_html = f'''
+                <div class="report-container">
+                    <div class="report-header">
+                        <span class="report-title">📋 Analysis Report</span>
+                        <span class="report-badge">✓ Ready to review</span>
+                    </div>
+                    <div class="report-body-wrapper">
+                        <div class="report-body">
+                            {result_html}
+                        </div>
+                    </div>
+                    <div class="report-disclaimer">
+                        <div class="disclaimer-box">
+                            <strong>⚠️ Important:</strong> This is an informational summary, not a diagnosis or a substitute for advice from a qualified healthcare professional. For severe or worsening symptoms, seek urgent medical care.
+                        </div>
+                    </div>
+                </div>
+                '''
+                
+                st.session_state["last_report_html"] = report_html
+                st.rerun()
+            except Exception as exc:
+                st.error(f"❌ We couldn't complete the analysis. Details: {exc}")
     
-    else:
-        # No image uploaded yet
-        st.info("📷 Please upload an image or take a photo to begin analysis.")
-        if user_question:
-            st.warning("📄 You've asked a question, but please also upload or capture an image of the document so MedInsight AI can analyze it.")
+    if st.session_state.get("last_report_html"):
+        st.markdown(st.session_state["last_report_html"], unsafe_allow_html=True)
 
 if page == "WHO knowledge":
     st.markdown('<div class="section-head"><div><div class="section-title">🌍 WHO Knowledge & Updates</div><div class="section-note">A curated doorway to official World Health Organization information.</div></div><div class="view-all">Official sources</div></div>', unsafe_allow_html=True)
