@@ -2,7 +2,6 @@ import streamlit as st
 import markdown as md
 from PIL import Image
 import os
-import subprocess
 import tempfile
 import base64
 import json
@@ -167,12 +166,12 @@ If it is a LAB REPORT, use markdown headers for:
 2. What abnormal values mean, in one simple sentence each
 3. Overall summary in plain language, avoiding scary diagnostic labels"""
 
+# --- STYLES ---
 st.markdown(
     """
     <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap');
     
-    /* ===== ROOT VARIABLES - GREEN THEME ===== */
     :root {
         --bg: #f0f7f2;
         --paper: #ffffff;
@@ -188,8 +187,6 @@ st.markdown(
         --sage: #e8f5ec;
         --cream: #fbf7ed;
         --danger: #a44145;
-        --shadow: 0 20px 60px rgba(13, 61, 46, 0.3);
-        --shadow-sm: 0 4px 12px rgba(13, 61, 46, 0.06);
     }
     
     html,body,[class*="css"]{font-family:'DM Sans',sans-serif}.stApp{background:var(--bg);color:var(--ink)}
@@ -452,6 +449,19 @@ st.markdown(
     .stTabs [data-baseweb="tab"]{font-size:.7rem;font-weight:800;color:var(--forest2);border-radius:8px;padding:.45rem .7rem}
     .stTabs [aria-selected="true"]{background:var(--forest);color:white!important}
     
+    /* Fix for text input in voice tab */
+    .stTextArea textarea {
+        font-size: 0.9rem !important;
+        border-radius: 12px !important;
+        border: 2px solid var(--line) !important;
+        padding: 0.8rem !important;
+        background: white !important;
+    }
+    .stTextArea textarea:focus {
+        border-color: var(--green) !important;
+        box-shadow: 0 0 0 3px rgba(46, 155, 98, 0.1) !important;
+    }
+    
     .footer{text-align:center;color:#6f8b78;font-size:.62rem;padding:1.5rem 0 .5rem}
     
     @media(max-width:850px){.metrics{grid-template-columns:repeat(2,1fr)}.cards{grid-template-columns:1fr}.top-actions .status{display:none}.workspace-top{display:block}.privacy-tag{display:inline-block;margin-top:.5rem}}
@@ -468,21 +478,12 @@ with st.sidebar:
     st.markdown('<div class="side-section">Quick capture</div>', unsafe_allow_html=True)
     st.caption("Capture here, then finish the analysis in the workspace.")
     sidebar_camera_file = st.camera_input("📷 Capture document", key="sidebar_camera")
-    sidebar_voice_file = None
-    sidebar_voice_text = ""
     
-    # Check if audio input is available
-    if hasattr(st, "audio_input"):
-        sidebar_voice_file = st.audio_input("🎙️ Speak a question", key="sidebar_voice")
-        if sidebar_voice_file is not None:
-            st.info("🎤 Voice captured! Note: Voice transcription requires local setup. For cloud deployment, use text input instead.")
-            # Store the audio file for later use
-            st.session_state.sidebar_audio = sidebar_voice_file
-    else:
-        st.caption("📝 For voice input, please type your question below")
-    
-    # Add a text input as fallback
-    sidebar_voice_text = st.text_area("📝 Type your question (alternative to voice)", placeholder="e.g., What does this medicine do?", height=75, key="sidebar_text_input")
+    # Simple text input for voice/question in sidebar
+    sidebar_voice_text = st.text_area("📝 Type your question", 
+                                     placeholder="e.g., What does this medicine do?",
+                                     height=60, 
+                                     key="sidebar_voice_text")
     
     st.markdown('<div class="side-section">Account & help</div>', unsafe_allow_html=True)
     page2 = st.radio("Account and help", ["No extra page", "Safety & privacy", "Settings", "Help centre"], label_visibility="collapsed")
@@ -612,42 +613,44 @@ if page == "Dashboard":
 if page in ["Dashboard", "New analysis"]:
     st.markdown('<div class="section-head" id="new-analysis"><div><div class="section-title">Start a new analysis</div><div class="section-note">One clear image is all you need.</div></div></div>', unsafe_allow_html=True)
     st.markdown('<div class="workspace"><div class="workspace-top"><div><div class="workspace-title">Add a medical document</div><div class="workspace-copy">JPG, JPEG, or PNG · up to 200 MB</div></div><div class="privacy-tag">✦ Information-first, not diagnosis</div></div><div class="drop">', unsafe_allow_html=True)
-    upload_tab, camera_tab, voice_tab = st.tabs(["📤 Upload from device", "📷 Use camera", "🎙️ Speak to MedInsight"])
+    upload_tab, camera_tab, voice_tab = st.tabs(["📤 Upload from device", "📷 Use camera", "💬 Ask a question"])
+    
     uploaded_file = None
     camera_file = None
-    voice_file = None
     voice_text = ""
+    
     with upload_tab:
         uploaded_file = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"], label_visibility="collapsed")
         st.markdown('<div class="hint">Drop an image here or browse your device · Use a well-lit, in-focus photo</div>', unsafe_allow_html=True)
+    
     with camera_tab:
         camera_file = st.camera_input("Take a photo of your document", label_visibility="collapsed")
+    
     with voice_tab:
         st.markdown('''
         <div class="doctor-note-voice">
-            <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#bdf0ca,#7edba0);display:flex;align-items:center;justify-content:center;font-size:1.5rem;flex-shrink:0;border:3px solid white;box-shadow:0 4px 12px rgba(0,0,0,0.08)">👨‍⚕️</div>
+            <div style="width:48px;height:48px;border-radius:50%;background:linear-gradient(135deg,#bdf0ca,#7edba0);display:flex;align-items:center;justify-content:center;font-size:1.5rem;flex-shrink:0;border:3px solid white;box-shadow:0 4px 12px rgba(0,0,0,0.08)">💬</div>
             <div class="doc-info">
-                <strong>Tell us what you want to understand</strong>
-                <span>Speak a question or type it below. Your words will be used for the analysis context.</span>
+                <strong>Ask a question about your document</strong>
+                <span>Type what you want to understand about the medicine, lab report, or prescription.</span>
             </div>
-            <div class="doc-icon">🎙️</div>
+            <div class="doc-icon">📝</div>
         </div>
         ''', unsafe_allow_html=True)
         
-        # Use text input as the primary method for voice/query (works everywhere)
-        voice_text = st.text_area("📝 Type your question about the document", 
-                                 placeholder="e.g., What does this medicine do? How should I take it?",
-                                 height=80,
-                                 key="voice_text_input")
+        voice_text = st.text_area(
+            "Your question", 
+            placeholder="e.g., What does this medicine do? How should I take it? What do these lab results mean?",
+            height=100,
+            key="voice_question_input",
+            label_visibility="collapsed"
+        )
         
-        # Also allow audio upload if available (optional)
-        if hasattr(st, "audio_input"):
-            voice_file = st.audio_input("🎤 Or record your question (optional)", label_visibility="collapsed")
-            if voice_file is not None:
-                st.info("🎤 Voice recorded! Note: Automatic transcription requires local setup. Please type your question above or use the text input.")
-                # Store the audio file in session state
-                st.session_state.voice_audio = voice_file
+        if voice_text:
+            st.success(f"✅ Question recorded: {voice_text[:100]}{'...' if len(voice_text) > 100 else ''}")
+    
     st.markdown('</div></div>', unsafe_allow_html=True)
+    
     image_source = uploaded_file if uploaded_file is not None else camera_file
     if image_source is None:
         image_source = sidebar_camera_file
@@ -657,20 +660,21 @@ if page in ["Dashboard", "New analysis"]:
     
     if active_voice_text and image_source is None:
         st.warning("📄 Please add a document image from Upload or Camera so MedInsight AI can analyze it alongside your question.")
+    
     if active_voice_text and image_source is not None:
-        st.info(f"🎤 Question ready for this document: {active_voice_text}")
+        st.info(f"💬 Your question: {active_voice_text}")
     
     if image_source is not None:
         image = Image.open(image_source)
         st.image(image, caption="Document preview", use_container_width=True)
         
         if st.button("✨ Create my clear summary", use_container_width=True):
-            with st.spinner("Reading the document and organizing the findings…"):
+            with st.spinner("Reading the document and analyzing your question..."):
                 try:
                     # Get the analysis result
                     result = analyze_health_document_openai(image)
                     
-                    # Add any voice question context if provided
+                    # Add voice question if provided
                     if active_voice_text:
                         result = f"User's question: {active_voice_text}\n\n{result}"
                     
@@ -702,6 +706,7 @@ if page in ["Dashboard", "New analysis"]:
                         st.rerun()
                 except Exception as exc:
                     st.error(f"❌ We couldn't complete the analysis. Please try a clearer image or try again. Details: {exc}")
+        
         if st.session_state.get("last_report_html"):
             st.markdown(st.session_state["last_report_html"], unsafe_allow_html=True)
 
